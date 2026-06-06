@@ -583,6 +583,8 @@ void IMatrixCollector::save_imatrix(int32_t n_chunk) const {
         }
         if (!m_params.prompt_file.empty()) {
             datasets.push_back(m_params.prompt_file.c_str());
+        } else if (!m_params.chat_input_file.empty()) {
+            datasets.push_back(m_params.chat_input_file.c_str());
         }
 
         gguf_set_val_str(ctx_gguf, "general.type", "imatrix");
@@ -1111,6 +1113,7 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
         conv_idx++;
     }
 
+    llama_batch_free(batch);
     if (mtmd_ctx) mtmd_free(mtmd_ctx);
     return true;
 }
