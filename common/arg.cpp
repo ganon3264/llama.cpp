@@ -57,6 +57,7 @@ static std::initializer_list<enum llama_example> mmproj_examples = {
     LLAMA_EXAMPLE_MTMD,
     LLAMA_EXAMPLE_SERVER,
     LLAMA_EXAMPLE_CLI,
+    LLAMA_EXAMPLE_IMATRIX,
 };
 
 static std::string read_file(const std::string & fname) {
@@ -2774,6 +2775,22 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_BENCH, LLAMA_EXAMPLE_PARALLEL}));
     add_opt(common_arg(
+        {"--chat-file"},
+        "FNAME",
+        "JSONL file with conversations for chat template imatrix mode",
+        [](common_params & params, const std::string & value) {
+            params.chat_input_file = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_IMATRIX}));
+    add_opt(common_arg(
+        {"--n-turns"},
+        "INT",
+        string_format("max turns per conversation in chat template imatrix mode (-1 = all, default: %d)", params.n_turns),
+                       [](common_params & params, int value) {
+                           params.n_turns = value;
+                       }
+    ).set_examples({LLAMA_EXAMPLE_IMATRIX}));
+    add_opt(common_arg(
         {"-tgs"},
         string_format("is the text generation separated across the different sequences (default: %s)", params.is_tg_separate ? "true" : "false"),
         [](common_params & params) {
@@ -3219,7 +3236,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, const std::string & value) {
             params.chat_template = read_file(value);
         }
-    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
+    ).set_examples({LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_IMATRIX}).set_env("LLAMA_ARG_CHAT_TEMPLATE_FILE"));
     add_opt(common_arg(
         {"--skip-chat-parsing"},
         {"--no-skip-chat-parsing"},

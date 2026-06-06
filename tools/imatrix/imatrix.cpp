@@ -1,9 +1,13 @@
 #include "arg.h"
 #include "common.h"
+#include "chat.h"
 #include "imatrix-loader.h"
 #include "log.h"
 #include "llama.h"
 #include "gguf.h"
+#include "nlohmann/json.hpp"
+#include "mtmd.h"
+#include "mtmd-helper.h"
 
 #include <algorithm>
 #include <chrono>
@@ -946,6 +950,171 @@ static bool compute_imatrix(llama_context * ctx, const common_params & params, c
     return true;
 }
 
+static bool compute_imatrix_chat(llama_context * ctx, const common_params & params, const int32_t n_ctx) {
+    const llama_model * model = llama_get_model(ctx);
+
+    common_chat_templates_ptr tmpls = common_chat_templates_init(model, params.chat_template);
+
+    // init mtmd context if mmproj is provided
+    mtmd_context * mtmd_ctx = nullptr;
+    if (!params.mmproj.path.empty()) {
+        mtmd_context_params mparams = mtmd_context_params_default();
+        mparams.cb_eval          = ik_collect_imatrix;
+        mparams.cb_eval_user_data = NULL;
+        mparams.use_gpu          = params.mmproj_use_gpu;
+        mparams.warmup           = false;
+        mtmd_ctx = mtmd_init_from_file(params.mmproj.path.c_str(), model, mparams);
+        if (!mtmd_ctx) {
+            LOG_ERR("%s: failed to init mtmd context from %s\n", __func__, params.mmproj.path.c_str());
+            return false;
+        }
+        LOG_INF("%s: mtmd context initialized (vision=%d audio=%d)\n", __func__,
+                mtmd_support_vision(mtmd_ctx), mtmd_support_audio(mtmd_ctx));
+    }
+
+    std::ifstream f(params.chat_input_file);
+    if (!f) {
+        LOG_ERR("%s: failed to open %s\n", __func__, params.chat_input_file.c_str());
+        if (mtmd_ctx) mtmd_free(mtmd_ctx);
+        return false;
+    }
+
+    llama_batch batch = llama_batch_init(n_ctx, 0, 1);
+    const int32_t n_batch = params.n_batch;
+
+    std::string line;
+    int conv_idx = 0;
+
+    while (std::getline(f, line)) {
+        if (line.empty()) continue;
+
+        json j = json::parse(line, nullptr, false);
+        if (j.is_discarded()) {
+            LOG_WRN("%s: skipping invalid JSON on line %d\n", __func__, conv_idx + 1);
+            continue;
+        }
+
+        // parse messages — each element may have "role", "content", "media": ["file1.jpg", ...]
+        std::vector<common_chat_msg> messages;
+        std::vector<std::vector<std::string>> messages_media; // parallel media list per message
+
+        for (const auto & m : j) {
+            common_chat_msg msg;
+            msg.role    = m.value("role", "");
+            msg.content = m.value("content", "");
+            messages.push_back(msg);
+
+            std::vector<std::string> media;
+            if (m.contains("media") && m["media"].is_array()) {
+                for (const auto & mf : m["media"]) {
+                    media.push_back(mf.get<std::string>());
+                }
+            }
+            messages_media.push_back(media);
+        }
+
+        llama_memory_clear(llama_get_memory(ctx), true);
+
+        std::vector<common_chat_msg> past;
+        llama_pos pos       = 0;
+        int32_t turn_count  = 0;
+
+        for (size_t mi = 0; mi < messages.size(); ++mi) {
+            if (params.n_turns >= 0 && turn_count >= params.n_turns) break;
+
+            const auto & msg   = messages[mi];
+            const auto & media = messages_media[mi];
+
+            bool add_ass = (msg.role == "user");
+            std::string formatted = common_chat_format_single(
+                tmpls.get(), past, msg, add_ass, params.use_jinja);
+
+            LOG_INF("%s: conv %d turn %d/%d\n", __func__, conv_idx, turn_count + 1, (int)messages.size());
+
+            if (mtmd_ctx && !media.empty()) {
+                // load bitmaps
+                mtmd::bitmaps bitmaps;
+                bool load_ok = true;
+                for (const auto & mpath : media) {
+                    mtmd_bitmap * bmp = mtmd_helper_bitmap_init_from_file(mtmd_ctx, mpath.c_str());
+                    if (!bmp) {
+                        LOG_WRN("%s: failed to load media file %s, skipping turn\n", __func__, mpath.c_str());
+                        load_ok = false;
+                        break;
+                    }
+                    bitmaps.entries.emplace_back(bmp);
+                }
+                if (!load_ok) {
+                    past.push_back(msg);
+                    continue;
+                }
+
+                mtmd_input_text input_text = { formatted.c_str(), false, true };
+                mtmd::input_chunks chunks(mtmd_input_chunks_init());
+                auto bitmaps_ptr = bitmaps.c_ptr();
+
+                int32_t rc = mtmd_tokenize(mtmd_ctx, chunks.ptr.get(), &input_text,
+                                           bitmaps_ptr.data(), bitmaps_ptr.size());
+                if (rc != 0) {
+                    LOG_WRN("%s: mtmd_tokenize failed (rc=%d), skipping turn\n", __func__, rc);
+                    past.push_back(msg);
+                    continue;
+                }
+
+                size_t n_tokens = mtmd_helper_get_n_tokens(chunks.ptr.get());
+                if (pos + (llama_pos)n_tokens > n_ctx) {
+                    LOG_INF("%s: conv %d context full at turn %d, moving on\n", __func__, conv_idx, turn_count + 1);
+                    break;
+                }
+
+                llama_pos new_pos;
+                rc = mtmd_helper_eval_chunks(mtmd_ctx, ctx, chunks.ptr.get(),
+                                             pos, 0, n_batch, false, &new_pos);
+                if (rc != 0) {
+                    LOG_ERR("%s: mtmd_helper_eval_chunks failed (rc=%d)\n", __func__, rc);
+                    if (mtmd_ctx) mtmd_free(mtmd_ctx);
+                    return false;
+                }
+                pos = new_pos;
+
+            } else {
+                // text-only turn
+                std::vector<llama_token> tokens = common_tokenize(ctx, formatted, false, true);
+                if (tokens.empty()) {
+                    past.push_back(msg);
+                    continue;
+                }
+
+                if (pos + (llama_pos)tokens.size() > n_ctx) {
+                    LOG_INF("%s: conv %d context full at turn %d, moving on\n", __func__, conv_idx, turn_count + 1);
+                    break;
+                }
+
+                common_batch_clear(batch);
+                for (int32_t k = 0; k < (int32_t)tokens.size(); ++k) {
+                    common_batch_add(batch, tokens[k], pos + k, {0}, true);
+                }
+                if (llama_decode(ctx, batch)) {
+                    LOG_ERR("%s: llama_decode failed\n", __func__);
+                    if (mtmd_ctx) mtmd_free(mtmd_ctx);
+                    llama_batch_free(batch);
+                    return false;
+                }
+                pos += tokens.size();
+            }
+
+            past.push_back(msg);
+            turn_count++;
+        }
+
+        LOG_INF("%s: conversation %d done: %d turns, %d tokens\n", __func__, conv_idx, turn_count, (int)pos);
+        conv_idx++;
+    }
+
+    if (mtmd_ctx) mtmd_free(mtmd_ctx);
+    return true;
+}
+
 static bool show_statistics(const common_params & params) {
     std::vector<tensor_statistics> ts;
     if (params.in_files.empty() || params.in_files.size() > 1) {
@@ -1108,7 +1277,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (params.prompt.empty()) {
+    if (params.prompt.empty() && params.chat_input_file.empty()) {
         LOG_INF("No prompt provided; combining precomputed matrices only.\n");
 
         if (params.in_files.empty()) {
@@ -1159,9 +1328,10 @@ int main(int argc, char ** argv) {
         LOG_INF("%s\n", common_params_get_system_info(params).c_str());
     }
 
-    if (!compute_imatrix(ctx, params, n_ctx)) {
-        return 1;
-    }
+    bool ok = params.chat_input_file.empty()
+        ? compute_imatrix(ctx, params, n_ctx)
+        : compute_imatrix_chat(ctx, params, n_ctx);
+    if (!ok) return 1;
 
     g_collector.save_imatrix();
 
