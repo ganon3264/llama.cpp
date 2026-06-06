@@ -29,12 +29,18 @@ The parameters in square brackets are optional and have the following meaning:
 * `--chunks` maximum number of chunks to process. Default is -1 for all available chunks.
 * `--no-ppl` disables the calculation of perplexity for the processed chunks. Useful if you want to speed up the processing and do not care about perplexity.
 * `--show-statistics` displays imatrix file's statistics.
+* `--chat-file` JSONL formatted dataset (replaces standard --in-file).
 
 For faster computation, make sure to use GPU offloading via the `-ngl | --n-gpu-layers` argument.
 
 Recent versions of `llama-imatrix` store data in GGUF format by default. For the legacy format, use an extension other than `.gguf` when saving the output file. More information is available in <https://github.com/ggml-org/llama.cpp/pull/9400>.
 
 ## Examples
+
+```bash
+# generate importance matrix using jinja formatted template and multimodal data supported by model's mmproj
+./llama-imatrix -m ggml-model-f16.gguf -mm ggml-model-f16-mmproj.gguf --chat-file dataset.jsonl -ngl 99 -o imat.gguf
+```
 
 ```bash
 # generate importance matrix using default filename (imatrix.gguf), offloading 99 layers to GPU
@@ -96,3 +102,19 @@ Weighted averages of Σ(Act²), ZD Score and CosSim are also calculated.
 
 When using these statistics, please note that they are computed on the squared activations, **not on the actual (raw) activations**.
 Whilst the results are still useful, they're less reliable than using the raw values, and in the case of the cosine similarity, could be misleading if the tensor contains opposite vectors.
+
+#### How to format JSONL
+
+Regular text example:
+
+```json
+[{"role":"user","content":"What is the capital of France?"},{"role":"assistant","content":"The capital of France is Paris."}]
+```
+
+Multimodal example (media file needs to be in the same directory as the .jsonl):
+
+```json
+[{"role":"user","content":"Can you transcribe and translate this audio? <__media__>","media":["1.wav"]}]
+```
+
+Each line is a separate conversation. This distinction is important because the chat mode iterates over each turn without discarding KV cache until the conversation runs out, or the context runs out. Then the program moves onto the next line.
