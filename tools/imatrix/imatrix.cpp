@@ -1038,7 +1038,7 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
                 mtmd::bitmaps bitmaps;
                 bool load_ok = true;
                 for (const auto & mpath : media) {
-                    mtmd_bitmap * bmp = mtmd_helper_bitmap_init_from_file(mtmd_ctx, mpath.c_str());
+                    mtmd_bitmap * bmp = mtmd_helper_bitmap_init_from_file(mtmd_ctx, mpath.c_str(), false);
                     if (!bmp) {
                         LOG_WRN("%s: failed to load media file %s, skipping turn\n", __func__, mpath.c_str());
                         load_ok = false;
