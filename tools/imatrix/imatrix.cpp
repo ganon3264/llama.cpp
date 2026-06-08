@@ -1075,6 +1075,7 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
                 if (rc != 0) {
                     LOG_ERR("%s: mtmd_helper_eval_chunks failed (rc=%d)\n", __func__, rc);
                     if (mtmd_ctx) mtmd_free(mtmd_ctx);
+                    llama_batch_free(batch);
                     return false;
                 }
                 pos = new_pos;
@@ -1113,8 +1114,8 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
         conv_idx++;
     }
 
-    llama_batch_free(batch);
     if (mtmd_ctx) mtmd_free(mtmd_ctx);
+    llama_batch_free(batch);
     return true;
 }
 
