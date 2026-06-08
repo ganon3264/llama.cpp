@@ -974,6 +974,15 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
                 mtmd_support_vision(mtmd_ctx), mtmd_support_audio(mtmd_ctx));
     }
 
+    int total_convs = 0;
+    {
+        std::ifstream f_count(params.chat_input_file);
+        std::string l;
+        while (std::getline(f_count, l)) {
+            if (!l.empty()) total_convs++;
+        }
+    }
+
     std::ifstream f(params.chat_input_file);
     if (!f) {
         LOG_ERR("%s: failed to open %s\n", __func__, params.chat_input_file.c_str());
@@ -984,6 +993,7 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
     llama_batch batch = llama_batch_init(n_ctx, 0, 1);
     const int32_t n_batch = params.n_batch;
 
+    int64_t total_tokens = 0;
     std::string line;
     int conv_idx = 0;
 
@@ -1038,13 +1048,16 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
                 mtmd::bitmaps bitmaps;
                 bool load_ok = true;
                 for (const auto & mpath : media) {
-                    mtmd_bitmap * bmp = mtmd_helper_bitmap_init_from_file(mtmd_ctx, mpath.c_str(), false);
+                    mtmd_helper_bitmap_wrapper bmp_wrap = mtmd_helper_bitmap_init_from_file(mtmd_ctx, mpath.c_str(), false);
+                    mtmd_bitmap * bmp = bmp_wrap.bitmap;
                     if (!bmp) {
                         LOG_WRN("%s: failed to load media file %s, skipping turn\n", __func__, mpath.c_str());
+                        if (bmp_wrap.video_ctx) mtmd_helper_video_free(bmp_wrap.video_ctx);
                         load_ok = false;
                         break;
                     }
                     bitmaps.entries.emplace_back(bmp);
+                    if (bmp_wrap.video_ctx) mtmd_helper_video_free(bmp_wrap.video_ctx);
                 }
                 if (!load_ok) {
                     past.push_back(msg);
@@ -1110,7 +1123,10 @@ static bool compute_imatrix_chat(llama_context * ctx, const common_params & para
             turn_count++;
         }
 
-        LOG_INF("%s: conversation %d done: %d turns, %d tokens\n", __func__, conv_idx, turn_count, (int)pos);
+        total_tokens += pos;
+        LOG_INF("%s: conversation %d/%d done: %d turns, %d tokens | total %lld tokens\n",
+                __func__, conv_idx + 1, total_convs, turn_count, (int)pos,
+                (long long)total_tokens);
         conv_idx++;
     }
 
